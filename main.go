@@ -163,6 +163,9 @@ func getRepos(gh *github.Client, orgOrRepo string) ([]repo, error) {
 				return nil, errors.Wrapf(err, "listing repos by org %s", orgOrRepo)
 			}
 			for _, r := range rs {
+				if r.Archived != nil && *r.Archived {
+					continue
+				}
 				repos = append(repos, repo(r.GetFullName()))
 			}
 			if resp.NextPage == 0 {
@@ -193,7 +196,7 @@ func parseMilestoneDueOn(d string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, errors.Wrap(err, "malformed date; please use 1/2/2006 format")
 	}
-	t = t.Add(time.Hour * 8) // All GitHub milestones at 8am.
+	t = t.Add(time.Hour * 7) // All GitHub milestones at 7am.
 	return t, nil
 }
 
@@ -287,24 +290,11 @@ func doSetMilestone(orgOrRepo string, milestone string, newDueOn time.Time) erro
 			return errors.Wrapf(err, "listing milestones for repo %s", r)
 		}
 
-		for _, m := range ms {
-			t, n, s, d := m.GetTitle(), m.GetNumber(), m.GetState(), m.GetDueOn()
-			if t == milestone && s == "open" && d != newDueOn {
-				if yes {
-					m.DueOn = &newDueOn
-					_, _, err := gh.Issues.EditMilestone(context.Background(), r.Owner(), r.Repo(), n, m)
-					if err != nil {
-						return errors.Wrapf(err, "editing milestone %s (#%d) in repo %s", t, n, r)
-					}
-					fmt.Printf("changed milestone %s (#%d) in repo %s due date from %v to %v\n",
-						t, n, r, d, newDueOn)
-				} else {
-					fmt.Printf("would change milestone %s (#%d) in repo %s due date from %v to %v\n",
-						t, n, r, d, newDueOn)
-				}
-
-				c++
-			}
+		_, changed, err := changeMilestoneDueOn(gh, r, ms, milestone, newDueOn)
+		if err != nil {
+			return err
+		} else if changed {
+			c++
 		}
 	}
 
@@ -379,6 +369,94 @@ func doCloseMilestone(orgOrRepo string, milestone string) error {
 }
 
 func doOpenMilestone(orgOrRepo, milestone string, dueOn time.Time) error {
-	// TODO(joe): implement this.
-	return errors.New("NYI")
+	gh := ghClient()
+
+	// First get the list of repos under consideration.
+	repos, err := getRepos(gh, orgOrRepo)
+	if err != nil {
+		return err
+	}
+
+	// Now, for each of them, loop over and create a milestone. If it already exists, see if
+	// we need to adjust the date.
+	var open, edit int
+	for _, r := range repos {
+		ms, _, err := gh.Issues.ListMilestones(context.Background(), r.Owner(), r.Repo(), nil)
+		if err != nil {
+			return errors.Wrapf(err, "listing milestones for repo %s", r)
+		}
+
+		exists, changed, err := changeMilestoneDueOn(gh, r, ms, milestone, dueOn)
+		if err != nil {
+			return err
+		}
+
+		if exists {
+			if changed {
+				edit++
+			}
+		} else {
+			if yes {
+				o := "open"
+				m := &github.Milestone{
+					Title: &milestone,
+					DueOn: &dueOn,
+					State: &o,
+				}
+				res, _, err := gh.Issues.CreateMilestone(context.Background(), r.Owner(), r.Repo(), m)
+				if err != nil {
+					return errors.Wrapf(err, "opening milestone %s in repo %s", milestone, r)
+				}
+				fmt.Printf("opened milestone %s (#%d) in repo %s with a due date on %v\n",
+					milestone, res.Number, r, dueOn)
+			} else {
+				fmt.Printf("would open milestone %s in repo %s with a due date on %v\n", milestone, r, dueOn)
+			}
+			open++
+		}
+	}
+
+	if open > 0 || edit > 0 {
+		if yes {
+			fmt.Printf("opened %d and edited %d milestones\n", open, edit)
+		} else {
+			fmt.Printf("would open %d and edit %d milestones; re-run with --yes to do so\n", open, edit)
+		}
+	}
+
+	return nil
+}
+
+// changeMilestoneDueOn looks in a list of milestones, for the given repo, for a match. If there is an open
+// milestone with a different due date, it will be changed. The function returns two bools: one says whether
+// the milestone in question was found, the other says whether the milestone was edited.
+func changeMilestoneDueOn(gh *github.Client, r repo, ms []*github.Milestone,
+	milestone string, newDueOn time.Time) (bool, bool, error) {
+	for _, m := range ms {
+		o := "open"
+		t, n, s, d := m.GetTitle(), m.GetNumber(), m.GetState(), m.GetDueOn()
+		if t == milestone {
+			if s != o || d != newDueOn {
+				if yes {
+					m.State = &o
+					m.DueOn = &newDueOn
+					_, _, err := gh.Issues.EditMilestone(context.Background(), r.Owner(), r.Repo(), n, m)
+					if err != nil {
+						return false, false, errors.Wrapf(err, "editing milestone %s (#%d) in repo %s", t, n, r)
+					}
+					fmt.Printf("changed milestone %s (#%d) in repo %s due date from %v to %v\n",
+						t, n, r, d, newDueOn)
+				} else {
+					fmt.Printf("would change milestone %s (#%d) in repo %s due date from %v to %v\n",
+						t, n, r, d, newDueOn)
+				}
+
+				return true, true, nil
+			}
+
+			return true, false, nil
+		}
+	}
+
+	return false, false, nil
 }
