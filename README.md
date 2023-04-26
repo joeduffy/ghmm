@@ -15,7 +15,7 @@ $ ghmm -t <TOKEN> open acmecorp M42 '7/1/2019'
 $ ghmm -t <TOKEN> set acmecorp M42 '8/1/2019'
 
 # Close out the M42 milestone across all repos in the ACMECorp organization:
-$ ghmm -t <TOKEN> close M42
+$ ghmm -t <TOKEN> close acmecorp M42
 ```
 
 Although these examples show bulk-editing across an organization, a single repo may be passed instead.
